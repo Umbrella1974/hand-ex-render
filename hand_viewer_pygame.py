@@ -39,7 +39,7 @@ PALM_POLY = [0, 5, 9, 13, 17]
 # Colours
 # ---------------------------------------------------------------------------
 BG_COLOR = (10, 10, 18)
-GRID_COLOR = (22, 22, 34)
+GRID_COLOR = (36, 36, 58)
 BONE_GLOW_WIDE = (0, 140, 200, 25)
 BONE_GLOW_MID = (0, 180, 240, 70)
 BONE_CORE = (0, 210, 255, 210)
@@ -151,22 +151,20 @@ class HandViewer:
         pygame.draw.polygon(surf, color, pts, width)
 
     def draw_bone_glow(self, surf, p1, p2):
-        pygame.draw.line(surf, BONE_GLOW_WIDE, p1, p2, 9)
-        pygame.draw.line(surf, BONE_GLOW_MID, p1, p2, 5)
-        pygame.draw.line(surf, BONE_CORE, p1, p2, 3)
-        pygame.draw.line(surf, BONE_BRIGHT, p1, p2, 1)
+        pygame.draw.line(surf, BONE_GLOW_WIDE, p1, p2, 15)
+        pygame.draw.line(surf, BONE_GLOW_MID, p1, p2, 9)
+        pygame.draw.line(surf, BONE_CORE, p1, p2, 5)
+        pygame.draw.line(surf, BONE_BRIGHT, p1, p2, 2)
 
     def draw_ground_grid(self):
         """XZ-plane reference grid (horizontal plane in viewer space)."""
-        half_cells = 12
+        half_cells = 16
         cell_size = 0.06
         for i in range(-half_cells, half_cells + 1):
             offset = i * cell_size
-            # Lines along Z (varying X)
             p_start = self.project(offset, -0.2, -half_cells * cell_size)
             p_end = self.project(offset, -0.2, half_cells * cell_size)
             pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
-            # Lines along X (varying Z)
             p_start = self.project(-half_cells * cell_size, -0.2, offset)
             p_end = self.project(half_cells * cell_size, -0.2, offset)
             pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
@@ -174,7 +172,7 @@ class HandViewer:
     def draw_origin_axes(self):
         """RGB axes from origin for orientation reference."""
         origin = self.project(0, 0, 0)
-        axis_len = 0.15
+        axis_len = 0.07
         x_tip = self.project(axis_len, 0, 0)
         y_tip = self.project(0, axis_len, 0)
         z_tip = self.project(0, 0, axis_len)
@@ -230,7 +228,7 @@ class HandViewer:
                     self.dragging = True
                     self.last_mouse = event.pos
                 elif event.button == 4:                     # scroll up
-                    self.zoom = min(4.0, self.zoom * 1.1)
+                    self.zoom = min(10.0, self.zoom * 1.1)
                 elif event.button == 5:                     # scroll down
                     self.zoom = max(0.1, self.zoom / 1.1)
             elif event.type == pygame.MOUSEBUTTONUP:
@@ -281,20 +279,20 @@ class HandViewer:
             # Joints
             for i, (px, py) in enumerate(proj):
                 if i in FINGERTIPS:
-                    self.draw_hex(glow_surf, px, py, 5, JOINT_TIP)
-                    self.draw_hex(glow_surf, px, py, 7, (*JOINT_TIP, 60), 1)
+                    self.draw_hex(glow_surf, px, py, 7, JOINT_TIP)
+                    self.draw_hex(glow_surf, px, py, 10, (*JOINT_TIP, 50), 1)
                 else:
-                    pygame.draw.circle(glow_surf, JOINT_RING, (px, py), 4, 1)
+                    pygame.draw.circle(glow_surf, JOINT_RING, (px, py), 5, 1)
 
             self.screen.blit(glow_surf, (0, 0))
         else:
             palm_pts = [proj[i] for i in PALM_POLY]
             pygame.draw.polygon(self.screen, (0, 80, 120), palm_pts, 1)
             for a, b in HAND_BONES:
-                pygame.draw.line(self.screen, BONE_LOW_POWER, proj[a], proj[b], 2)
+                pygame.draw.line(self.screen, BONE_LOW_POWER, proj[a], proj[b], 4)
             for i, (px, py) in enumerate(proj):
                 color = JOINT_TIP if i in FINGERTIPS else JOINT_RING
-                radius = 5 if i in FINGERTIPS else 3
+                radius = 7 if i in FINGERTIPS else 5
                 pygame.draw.circle(self.screen, color, (px, py), radius, 1)
 
         # HUD
@@ -337,7 +335,7 @@ def main():
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--scale", type=float, default=220)
+    parser.add_argument("--scale", type=float, default=300)
     parser.add_argument("--flip-x", action="store_true")
     parser.add_argument("--flip-y", action="store_true")
     parser.add_argument("--axis", choices=["xy", "xz", "yz"], default="xy")
