@@ -76,7 +76,7 @@ class HandViewer:
                                               pygame.DOUBLEBUF)
         pygame.display.set_caption("Right Hand Skeleton Viewer")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("consolas", 14)
+        self.font = pygame.font.Font(None, 16)
 
         # State
         self.latest_joints = None
