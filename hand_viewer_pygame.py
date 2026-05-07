@@ -1,5 +1,10 @@
 """Lightweight right-hand skeleton viewer using pygame + UDP.
 
+Mouse:
+  Left-drag  = orbit (rotate view)
+  Scroll     = zoom
+  R key      = reset view
+
 Usage:
     python hand_viewer_pygame.py --port 5005
     python hand_viewer_pygame.py --low-power --fps 20 --width 640 --height 480
@@ -8,8 +13,6 @@ Usage:
 import argparse
 import math
 import socket
-import struct
-import sys
 import time
 
 import numpy as np
@@ -21,22 +24,22 @@ from protocol import unpack_right_hand_packet, N_JOINTS
 # Bone connectivity – MediaPipe hand
 # ---------------------------------------------------------------------------
 HAND_BONES = [
-    (0, 1), (1, 2), (2, 3), (3, 4),       # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),       # index
-    (0, 9), (9, 10), (10, 11), (11, 12),  # middle
-    (0, 13), (13, 14), (14, 15), (15, 16),# ring
-    (0, 17), (17, 18), (18, 19), (19, 20),# pinky
-    (5, 9), (9, 13), (13, 17), (5, 17),   # palm transversals
+    (0, 1), (1, 2), (2, 3), (3, 4),         # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),         # index
+    (0, 9), (9, 10), (10, 11), (11, 12),    # middle
+    (0, 13), (13, 14), (14, 15), (15, 16),  # ring
+    (0, 17), (17, 18), (18, 19), (19, 20),  # pinky
+    (5, 9), (9, 13), (13, 17), (5, 17),     # palm transversals
 ]
 
 FINGERTIPS = {4, 8, 12, 16, 20}
-PALM_POLY = [0, 5, 9, 13, 17]  # wrist → knuckle row
+PALM_POLY = [0, 5, 9, 13, 17]
 
 # ---------------------------------------------------------------------------
-# Colours (RGBA / RGB)
+# Colours
 # ---------------------------------------------------------------------------
 BG_COLOR = (10, 10, 18)
-GRID_COLOR = (22, 22, 32)
+GRID_COLOR = (22, 22, 34)
 BONE_GLOW_WIDE = (0, 140, 200, 25)
 BONE_GLOW_MID = (0, 180, 240, 70)
 BONE_CORE = (0, 210, 255, 210)
@@ -48,6 +51,9 @@ PALM_FILL = (0, 160, 220, 35)
 PALM_LINE = (0, 180, 240, 80)
 HUD_TEXT = (180, 200, 220)
 WAIT_TEXT = (120, 130, 150)
+AXIS_X_COLOR = (255, 80, 80)
+AXIS_Y_COLOR = (80, 255, 80)
+AXIS_Z_COLOR = (80, 160, 255)
 
 
 class HandViewer:
@@ -68,7 +74,7 @@ class HandViewer:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.listen_ip, self.port))
-        self.sock.settimeout(0.001)  # non-blocking poll
+        self.sock.settimeout(0.001)
 
         # Pygame
         pygame.init()
@@ -78,9 +84,17 @@ class HandViewer:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 16)
 
+        # Orbit camera
+        self.yaw = 0.0
+        self.pitch = 0.0
+        self.zoom = 1.0
+        self.dragging = False
+        self.last_mouse = (0, 0)
+        self.orbit_sensitivity = 0.005
+
         # State
         self.latest_joints = None
-        self.smoothed = None          # EMA buffer, shape (21, 3) after first frame
+        self.smoothed = None
         self.latest_frame_id = 0
         self.latest_latency = 0.0
         self.last_packet_time = 0.0
@@ -89,27 +103,47 @@ class HandViewer:
         self.timeout_sec = 2.0
 
     # ------------------------------------------------------------------
-    # Project 3D → 2D screen
+    # Orbit rotation + projection
     # ------------------------------------------------------------------
+    def rotate_point(self, x, y, z):
+        """Apply yaw (around Y) then pitch (around X)."""
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        # yaw around Y
+        rx = cy * x + sy * z
+        rz = -sy * x + cy * z
+
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        # pitch around X (applied to yaw-transformed point)
+        ry = cp * y - sp * rz
+        rz2 = sp * y + cp * rz
+
+        return rx, ry, rz2
+
     def project(self, x, y, z):
+        rx, ry, rz = self.rotate_point(x, y, z)
+
         if self.axis == "xy":
-            sx, sy = x, -y
+            sx, sy = rx, -ry
         elif self.axis == "xz":
-            sx, sy = x, -z
+            sx, sy = rx, -rz
         else:  # yz
-            sx, sy = y, -z
+            sx, sy = ry, -rz
+
         if self.flip_x:
             sx = -sx
         if self.flip_y:
             sy = -sy
-        px = int(sx * self.scale + self.width / 2)
-        py = int(sy * self.scale + self.height / 2)
+
+        s = self.scale * self.zoom
+        px = int(sx * s + self.width / 2)
+        py = int(sy * s + self.height / 2)
         return px, py
 
     # ------------------------------------------------------------------
     # Drawing helpers
     # ------------------------------------------------------------------
-    def draw_hex(self, surf, cx, cy, radius, color, width=0):
+    @staticmethod
+    def draw_hex(surf, cx, cy, radius, color, width=0):
         pts = []
         for i in range(6):
             a = math.pi / 3 * i - math.pi / 6
@@ -117,17 +151,41 @@ class HandViewer:
         pygame.draw.polygon(surf, color, pts, width)
 
     def draw_bone_glow(self, surf, p1, p2):
-        """Multi-pass line for a cheap glow effect."""
         pygame.draw.line(surf, BONE_GLOW_WIDE, p1, p2, 9)
         pygame.draw.line(surf, BONE_GLOW_MID, p1, p2, 5)
         pygame.draw.line(surf, BONE_CORE, p1, p2, 3)
         pygame.draw.line(surf, BONE_BRIGHT, p1, p2, 1)
 
+    def draw_ground_grid(self):
+        """XZ-plane reference grid (horizontal plane in viewer space)."""
+        half_cells = 12
+        cell_size = 0.06
+        for i in range(-half_cells, half_cells + 1):
+            offset = i * cell_size
+            # Lines along Z (varying X)
+            p_start = self.project(offset, -0.2, -half_cells * cell_size)
+            p_end = self.project(offset, -0.2, half_cells * cell_size)
+            pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
+            # Lines along X (varying Z)
+            p_start = self.project(-half_cells * cell_size, -0.2, offset)
+            p_end = self.project(half_cells * cell_size, -0.2, offset)
+            pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
+
+    def draw_origin_axes(self):
+        """RGB axes from origin for orientation reference."""
+        origin = self.project(0, 0, 0)
+        axis_len = 0.15
+        x_tip = self.project(axis_len, 0, 0)
+        y_tip = self.project(0, axis_len, 0)
+        z_tip = self.project(0, 0, axis_len)
+        pygame.draw.line(self.screen, AXIS_X_COLOR, origin, x_tip, 2)
+        pygame.draw.line(self.screen, AXIS_Y_COLOR, origin, y_tip, 2)
+        pygame.draw.line(self.screen, AXIS_Z_COLOR, origin, z_tip, 2)
+
     # ------------------------------------------------------------------
-    # Main loop helpers
+    # Main loop
     # ------------------------------------------------------------------
     def recv_packets(self):
-        """Drain all queued UDP packets; keep only the latest."""
         latest = None
         while True:
             try:
@@ -156,18 +214,46 @@ class HandViewer:
                                        (1.0 - alpha) * self.smoothed[i][j])
         return self.smoothed
 
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.running = False
+                elif event.key == pygame.K_r:
+                    self.yaw = 0.0
+                    self.pitch = 0.0
+                    self.zoom = 1.0
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:                       # left
+                    self.dragging = True
+                    self.last_mouse = event.pos
+                elif event.button == 4:                     # scroll up
+                    self.zoom = min(4.0, self.zoom * 1.1)
+                elif event.button == 5:                     # scroll down
+                    self.zoom = max(0.1, self.zoom / 1.1)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    self.dragging = False
+            elif event.type == pygame.MOUSEMOTION:
+                if self.dragging:
+                    dx = event.pos[0] - self.last_mouse[0]
+                    dy = event.pos[1] - self.last_mouse[1]
+                    self.yaw -= dx * self.orbit_sensitivity
+                    self.pitch -= dy * self.orbit_sensitivity
+                    self.pitch = max(-math.pi / 2, min(math.pi / 2, self.pitch))
+                    self.last_mouse = event.pos
+
     def render_frame(self):
         self.screen.fill(BG_COLOR)
 
-        # Background grid (skip in low-power)
+        # Ground grid + axes (skip in low-power)
         if not self.low_power:
-            step = 50
-            for x in range(0, self.width, step):
-                pygame.draw.line(self.screen, GRID_COLOR, (x, 0), (x, self.height), 1)
-            for y in range(0, self.height, step):
-                pygame.draw.line(self.screen, GRID_COLOR, (0, y), (self.width, y), 1)
+            self.draw_ground_grid()
+            self.draw_origin_axes()
 
-        # Check timeout
+        # Timeout
         if (self.latest_joints is None or
                 time.time() - self.last_packet_time > self.timeout_sec):
             txt = self.font.render("Waiting for right hand UDP data...",
@@ -177,24 +263,22 @@ class HandViewer:
             pygame.display.flip()
             return
 
-        # Project all joints
         joints = self.apply_smoothing(self.latest_joints)
         proj = [self.project(*j) for j in joints]
 
-        # Glow surface (skip in low-power)
         if not self.low_power:
             glow_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
-            # Palm fill
+            # Palm
             palm_pts = [proj[i] for i in PALM_POLY]
             pygame.draw.polygon(glow_surf, PALM_FILL, palm_pts)
             pygame.draw.polygon(glow_surf, PALM_LINE, palm_pts, 1)
 
-            # Bones with glow
+            # Bones
             for a, b in HAND_BONES:
                 self.draw_bone_glow(glow_surf, proj[a], proj[b])
 
-            # Joints – rings for knuckles, hex for tips
+            # Joints
             for i, (px, py) in enumerate(proj):
                 if i in FINGERTIPS:
                     self.draw_hex(glow_surf, px, py, 5, JOINT_TIP)
@@ -204,7 +288,6 @@ class HandViewer:
 
             self.screen.blit(glow_surf, (0, 0))
         else:
-            # Low-power: plain lines, no alpha
             palm_pts = [proj[i] for i in PALM_POLY]
             pygame.draw.polygon(self.screen, (0, 80, 120), palm_pts, 1)
             for a, b in HAND_BONES:
@@ -214,12 +297,13 @@ class HandViewer:
                 radius = 5 if i in FINGERTIPS else 3
                 pygame.draw.circle(self.screen, color, (px, py), radius, 1)
 
-        # HUD – top-left
+        # HUD
         lines = [
             f"frame_id: {self.latest_frame_id}",
             f"fps: {self.clock.get_fps():.0f}",
             f"latency: {self.latest_latency:.1f} ms",
             f"pkts/sec: {self.packet_count}",
+            f"yaw: {math.degrees(self.yaw):.0f}  pitch: {math.degrees(self.pitch):.0f}  zoom: {self.zoom:.1f}",
         ]
         for i, text in enumerate(lines):
             surf = self.font.render(text, True, HUD_TEXT)
@@ -230,15 +314,9 @@ class HandViewer:
     def run(self):
         fps_update_ts = time.time()
         while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self.running = False
-
+            self.handle_events()
             self.recv_packets()
 
-            # Reset packet counter every second
             now = time.time()
             if now - fps_update_ts >= 1.0:
                 self.packet_count = 0
