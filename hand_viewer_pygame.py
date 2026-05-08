@@ -4,10 +4,12 @@ Mouse:
   Left-drag  = orbit (rotate view)
   Scroll     = zoom
   R key      = reset view
+  D key      = toggle dark mode
 
 Usage:
     python hand_viewer_pygame.py --port 5005
-    python hand_viewer_pygame.py --low-power --fps 20 --width 640 --height 480
+    python hand_viewer_pygame.py --dark              # original dark theme
+    python hand_viewer_pygame.py --low-power --fps 20
 """
 
 import argparse
@@ -15,7 +17,6 @@ import math
 import socket
 import time
 
-import numpy as np
 import pygame
 
 from protocol import unpack_right_hand_packet, N_JOINTS
@@ -24,36 +25,62 @@ from protocol import unpack_right_hand_packet, N_JOINTS
 # Bone connectivity – MediaPipe hand
 # ---------------------------------------------------------------------------
 HAND_BONES = [
-    (0, 1), (1, 2), (2, 3), (3, 4),         # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),         # index
-    (0, 9), (9, 10), (10, 11), (11, 12),    # middle
-    (0, 13), (13, 14), (14, 15), (15, 16),  # ring
-    (0, 17), (17, 18), (18, 19), (19, 20),  # pinky
-    (5, 9), (9, 13), (13, 17), (5, 17),     # palm transversals
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17), (5, 17),
 ]
 
 FINGERTIPS = {4, 8, 12, 16, 20}
 PALM_POLY = [0, 5, 9, 13, 17]
 
 # ---------------------------------------------------------------------------
-# Colours
+# Light theme (default)
 # ---------------------------------------------------------------------------
-BG_COLOR = (10, 10, 18)
-GRID_COLOR = (36, 36, 58)
-BONE_GLOW_WIDE = (0, 140, 200, 25)
-BONE_GLOW_MID = (0, 180, 240, 70)
-BONE_CORE = (0, 210, 255, 210)
-BONE_BRIGHT = (160, 230, 255, 255)
-BONE_LOW_POWER = (0, 190, 240)
-JOINT_RING = (0, 210, 255)
-JOINT_TIP = (100, 240, 255)
-PALM_FILL = (0, 160, 220, 35)
-PALM_LINE = (0, 180, 240, 80)
-HUD_TEXT = (180, 200, 220)
-WAIT_TEXT = (120, 130, 150)
-AXIS_X_COLOR = (255, 80, 80)
-AXIS_Y_COLOR = (80, 255, 80)
-AXIS_Z_COLOR = (80, 160, 255)
+LIGHT = {
+    "bg":          (248, 248, 252),
+    "grid":        (218, 218, 228),
+    "bone_out":    (100, 140, 210, 90),
+    "bone_core":   (35, 85, 175, 240),
+    "bone_low":    (40, 90, 180),
+    "joint_fill":  (50, 115, 210),
+    "joint_lit":   (180, 210, 255),
+    "tip_fill":    (235, 75, 45),
+    "tip_lit":     (255, 180, 150),
+    "palm_fill":   (80, 140, 220, 28),
+    "palm_line":   (80, 140, 220, 120),
+    "palm_low":    (60, 100, 170),
+    "hud":         (55, 55, 75),
+    "wait":        (140, 145, 160),
+    "axis_x":      (220, 50, 50),
+    "axis_y":      (50, 190, 50),
+    "axis_z":      (50, 120, 230),
+}
+
+# ---------------------------------------------------------------------------
+# Dark theme (--dark)
+# ---------------------------------------------------------------------------
+DARK = {
+    "bg":          (10, 10, 18),
+    "grid":        (28, 28, 48),
+    "bone_out":    (0, 140, 200, 45),
+    "bone_core":   (0, 210, 255, 230),
+    "bone_low":    (0, 190, 240),
+    "joint_fill":  (0, 200, 250),
+    "joint_lit":   (160, 240, 255),
+    "tip_fill":    (255, 160, 40),
+    "tip_lit":     (255, 220, 150),
+    "palm_fill":   (0, 160, 220, 35),
+    "palm_line":   (0, 180, 240, 80),
+    "palm_low":    (0, 120, 180),
+    "hud":         (180, 200, 220),
+    "wait":        (120, 130, 150),
+    "axis_x":      (255, 80, 80),
+    "axis_y":      (80, 255, 80),
+    "axis_z":      (80, 160, 255),
+}
 
 
 class HandViewer:
@@ -69,6 +96,8 @@ class HandViewer:
         self.axis = args.axis
         self.smooth = args.smooth
         self.low_power = args.low_power
+        self.dark = args.dark
+        self.pal = DARK if self.dark else LIGHT
 
         # Socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -83,6 +112,7 @@ class HandViewer:
         pygame.display.set_caption("Right Hand Skeleton Viewer")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 16)
+        self.font_small = pygame.font.Font(None, 13)
 
         # Orbit camera
         self.yaw = 0.0
@@ -103,85 +133,97 @@ class HandViewer:
         self.timeout_sec = 2.0
 
     # ------------------------------------------------------------------
-    # Orbit rotation + projection
+    # Rotation + projection
     # ------------------------------------------------------------------
     def rotate_point(self, x, y, z):
-        """Apply yaw (around Y) then pitch (around X)."""
         cy, sy = math.cos(self.yaw), math.sin(self.yaw)
-        # yaw around Y
         rx = cy * x + sy * z
         rz = -sy * x + cy * z
-
         cp, sp = math.cos(self.pitch), math.sin(self.pitch)
-        # pitch around X (applied to yaw-transformed point)
         ry = cp * y - sp * rz
         rz2 = sp * y + cp * rz
-
         return rx, ry, rz2
 
     def project(self, x, y, z):
         rx, ry, rz = self.rotate_point(x, y, z)
-
         if self.axis == "xy":
             sx, sy = rx, -ry
         elif self.axis == "xz":
             sx, sy = rx, -rz
-        else:  # yz
+        else:
             sx, sy = ry, -rz
-
         if self.flip_x:
             sx = -sx
         if self.flip_y:
             sy = -sy
-
         s = self.scale * self.zoom
-        px = int(sx * s + self.width / 2)
-        py = int(sy * s + self.height / 2)
-        return px, py
+        return int(sx * s + self.width / 2), int(sy * s + self.height / 2)
 
     # ------------------------------------------------------------------
     # Drawing helpers
     # ------------------------------------------------------------------
-    @staticmethod
-    def draw_hex(surf, cx, cy, radius, color, width=0):
-        pts = []
-        for i in range(6):
-            a = math.pi / 3 * i - math.pi / 6
-            pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
-        pygame.draw.polygon(surf, color, pts, width)
+    def draw_sphere_joint(self, surf, px, py, radius, fill, highlight):
+        """Filled circle + offset highlight = cheap 3D sphere illusion."""
+        pygame.draw.circle(surf, fill, (px, py), radius, 0)
+        r2 = max(radius // 2, 2)
+        off = max(radius // 4, 1)
+        pygame.draw.circle(surf, highlight, (px - off, py - off), r2, 0)
 
-    def draw_bone_glow(self, surf, p1, p2):
-        pygame.draw.line(surf, BONE_GLOW_WIDE, p1, p2, 15)
-        pygame.draw.line(surf, BONE_GLOW_MID, p1, p2, 9)
-        pygame.draw.line(surf, BONE_CORE, p1, p2, 5)
-        pygame.draw.line(surf, BONE_BRIGHT, p1, p2, 2)
+    def draw_bone_stroke(self, surf, p1, p2,
+                         outer_color, outer_w,
+                         core_color, core_w):
+        """Two-pass line: wide semi-transparent outline + solid core."""
+        pygame.draw.line(surf, outer_color, p1, p2, outer_w)
+        pygame.draw.line(surf, core_color, p1, p2, core_w)
 
     def draw_ground_grid(self):
-        """XZ-plane reference grid (horizontal plane in viewer space)."""
         half_cells = 16
         cell_size = 0.06
         for i in range(-half_cells, half_cells + 1):
-            offset = i * cell_size
-            p_start = self.project(offset, -0.2, -half_cells * cell_size)
-            p_end = self.project(offset, -0.2, half_cells * cell_size)
-            pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
-            p_start = self.project(-half_cells * cell_size, -0.2, offset)
-            p_end = self.project(half_cells * cell_size, -0.2, offset)
-            pygame.draw.line(self.screen, GRID_COLOR, p_start, p_end, 1)
+            off = i * cell_size
+            p1 = self.project(off, -0.2, -half_cells * cell_size)
+            p2 = self.project(off, -0.2, half_cells * cell_size)
+            pygame.draw.line(self.screen, self.pal["grid"], p1, p2, 1)
+            p1 = self.project(-half_cells * cell_size, -0.2, off)
+            p2 = self.project(half_cells * cell_size, -0.2, off)
+            pygame.draw.line(self.screen, self.pal["grid"], p1, p2, 1)
 
-    def draw_origin_axes(self):
-        """RGB axes from origin for orientation reference."""
-        origin = self.project(0, 0, 0)
-        axis_len = 0.07
-        x_tip = self.project(axis_len, 0, 0)
-        y_tip = self.project(0, axis_len, 0)
-        z_tip = self.project(0, 0, axis_len)
-        pygame.draw.line(self.screen, AXIS_X_COLOR, origin, x_tip, 2)
-        pygame.draw.line(self.screen, AXIS_Y_COLOR, origin, y_tip, 2)
-        pygame.draw.line(self.screen, AXIS_Z_COLOR, origin, z_tip, 2)
+    def draw_axis_widget(self):
+        """Orientation gizmo fixed to bottom-right corner, rotates with view."""
+        cx = self.width - 70
+        cy = self.height - 70
+        size = 45
+
+        # Rotated axis directions
+        axes = [
+            (self.rotate_point(1, 0, 0), self.pal["axis_x"]),
+            (self.rotate_point(0, 1, 0), self.pal["axis_y"]),
+            (self.rotate_point(0, 0, 1), self.pal["axis_z"]),
+        ]
+
+        # Widget background
+        widget_rect = pygame.Rect(cx - 48, cy - 48, 96, 96)
+        pygame.draw.rect(self.screen, self.pal["bg"], widget_rect)
+        pygame.draw.rect(self.screen, self.pal["grid"], widget_rect, 1)
+
+        for (rx, ry, rz), color in axes:
+            sx, sy = rx, -ry   # xy projection for widget
+            ex = int(cx + sx * size)
+            ey = int(cy + sy * size)
+            pygame.draw.line(self.screen, color, (cx, cy), (ex, ey), 3)
+
+        pygame.draw.circle(self.screen, self.pal["hud"], (cx, cy), 4)
+
+        # Labels
+        for (rx, ry, rz), label in [(axes[0][0], "X"), (axes[1][0], "Y"), (axes[2][0], "Z")]:
+            sx, sy = rx, -ry
+            lx = int(cx + sx * (size + 12))
+            ly = int(cy + sy * (size + 12))
+            t = self.font_small.render(label, True, self.pal["hud"])
+            self.screen.blit(t, (lx - 4, ly - 6))
 
     # ------------------------------------------------------------------
-    # Main loop
+    # Main-loop helpers
     # ------------------------------------------------------------------
     def recv_packets(self):
         latest = None
@@ -223,13 +265,16 @@ class HandViewer:
                     self.yaw = 0.0
                     self.pitch = 0.0
                     self.zoom = 1.0
+                elif event.key == pygame.K_d:
+                    self.dark = not self.dark
+                    self.pal = DARK if self.dark else LIGHT
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:                       # left
+                if event.button == 1:
                     self.dragging = True
                     self.last_mouse = event.pos
-                elif event.button == 4:                     # scroll up
+                elif event.button == 4:
                     self.zoom = min(10.0, self.zoom * 1.1)
-                elif event.button == 5:                     # scroll down
+                elif event.button == 5:
                     self.zoom = max(0.1, self.zoom / 1.1)
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
@@ -244,18 +289,18 @@ class HandViewer:
                     self.last_mouse = event.pos
 
     def render_frame(self):
-        self.screen.fill(BG_COLOR)
+        pal = self.pal
+        self.screen.fill(pal["bg"])
 
-        # Ground grid + axes (skip in low-power)
         if not self.low_power:
             self.draw_ground_grid()
-            self.draw_origin_axes()
+        self.draw_axis_widget()
 
         # Timeout
         if (self.latest_joints is None or
                 time.time() - self.last_packet_time > self.timeout_sec):
             txt = self.font.render("Waiting for right hand UDP data...",
-                                   True, WAIT_TEXT)
+                                   True, pal["wait"])
             r = txt.get_rect(center=(self.width // 2, self.height // 2))
             self.screen.blit(txt, r)
             pygame.display.flip()
@@ -265,46 +310,49 @@ class HandViewer:
         proj = [self.project(*j) for j in joints]
 
         if not self.low_power:
-            glow_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            glow = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
             # Palm
             palm_pts = [proj[i] for i in PALM_POLY]
-            pygame.draw.polygon(glow_surf, PALM_FILL, palm_pts)
-            pygame.draw.polygon(glow_surf, PALM_LINE, palm_pts, 1)
+            pygame.draw.polygon(glow, pal["palm_fill"], palm_pts)
+            pygame.draw.polygon(glow, pal["palm_line"], palm_pts, 1)
 
             # Bones
             for a, b in HAND_BONES:
-                self.draw_bone_glow(glow_surf, proj[a], proj[b])
+                self.draw_bone_stroke(glow, proj[a], proj[b],
+                                      pal["bone_out"], 13,
+                                      pal["bone_core"], 6)
 
             # Joints
             for i, (px, py) in enumerate(proj):
                 if i in FINGERTIPS:
-                    self.draw_hex(glow_surf, px, py, 7, JOINT_TIP)
-                    self.draw_hex(glow_surf, px, py, 10, (*JOINT_TIP, 50), 1)
+                    self.draw_sphere_joint(glow, px, py, 8,
+                                           pal["tip_fill"], pal["tip_lit"])
                 else:
-                    pygame.draw.circle(glow_surf, JOINT_RING, (px, py), 5, 1)
+                    self.draw_sphere_joint(glow, px, py, 6,
+                                           pal["joint_fill"], pal["joint_lit"])
 
-            self.screen.blit(glow_surf, (0, 0))
+            self.screen.blit(glow, (0, 0))
         else:
+            # Low-power: direct draw, no alpha
             palm_pts = [proj[i] for i in PALM_POLY]
-            pygame.draw.polygon(self.screen, (0, 80, 120), palm_pts, 1)
+            pygame.draw.polygon(self.screen, pal["palm_low"], palm_pts, 1)
             for a, b in HAND_BONES:
-                pygame.draw.line(self.screen, BONE_LOW_POWER, proj[a], proj[b], 4)
+                pygame.draw.line(self.screen, pal["bone_low"],
+                                 proj[a], proj[b], 5)
             for i, (px, py) in enumerate(proj):
-                color = JOINT_TIP if i in FINGERTIPS else JOINT_RING
-                radius = 7 if i in FINGERTIPS else 5
-                pygame.draw.circle(self.screen, color, (px, py), radius, 1)
+                color = pal["tip_fill"] if i in FINGERTIPS else pal["joint_fill"]
+                r = 8 if i in FINGERTIPS else 6
+                pygame.draw.circle(self.screen, color, (px, py), r, 0)
 
         # HUD
         lines = [
             f"frame_id: {self.latest_frame_id}",
-            f"fps: {self.clock.get_fps():.0f}",
-            f"latency: {self.latest_latency:.1f} ms",
-            f"pkts/sec: {self.packet_count}",
+            f"fps: {self.clock.get_fps():.0f}  latency: {self.latest_latency:.1f} ms",
             f"yaw: {math.degrees(self.yaw):.0f}  pitch: {math.degrees(self.pitch):.0f}  zoom: {self.zoom:.1f}",
         ]
         for i, text in enumerate(lines):
-            surf = self.font.render(text, True, HUD_TEXT)
+            surf = self.font.render(text, True, pal["hud"])
             self.screen.blit(surf, (10, 6 + i * 18))
 
         pygame.display.flip()
@@ -314,15 +362,12 @@ class HandViewer:
         while self.running:
             self.handle_events()
             self.recv_packets()
-
             now = time.time()
             if now - fps_update_ts >= 1.0:
                 self.packet_count = 0
                 fps_update_ts = now
-
             self.render_frame()
             self.clock.tick(self.target_fps)
-
         self.sock.close()
         pygame.quit()
 
@@ -341,8 +386,9 @@ def main():
     parser.add_argument("--axis", choices=["xy", "xz", "yz"], default="xy")
     parser.add_argument("--smooth", type=float, default=0.0)
     parser.add_argument("--low-power", action="store_true")
+    parser.add_argument("--dark", action="store_true",
+                        help="Use original dark theme")
     args = parser.parse_args()
-
     viewer = HandViewer(args)
     viewer.run()
 
