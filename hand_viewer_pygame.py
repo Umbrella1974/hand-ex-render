@@ -146,6 +146,10 @@ class HandViewer:
 
     def project(self, x, y, z):
         rx, ry, rz = self.rotate_point(x, y, z)
+        return self._project_rotated(rx, ry, rz)
+
+    def _project_rotated(self, rx, ry, rz):
+        """Screen coords from an already-rotated point."""
         if self.axis == "xy":
             sx, sy = rx, -ry
         elif self.axis == "xz":
@@ -307,24 +311,34 @@ class HandViewer:
             return
 
         joints = self.apply_smoothing(self.latest_joints)
-        proj = [self.project(*j) for j in joints]
+        # Pre-rotate all joints, compute depth (= rotated Z, negative = towards camera)
+        rotated = [self.rotate_point(*j) for j in joints]
+        proj = [self._project_rotated(rx, ry, rz) for rx, ry, rz in rotated]
+        depths = [rz for _, _, rz in rotated]
+
+        # Sort bones far→near by midpoint depth
+        bone_order = sorted(HAND_BONES,
+                            key=lambda ab: (depths[ab[0]] + depths[ab[1]]) * 0.5)
+        # Sort joints far→near by depth
+        joint_order = sorted(range(N_JOINTS), key=lambda i: depths[i])
 
         if not self.low_power:
             glow = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
-            # Palm
+            # Palm (always behind)
             palm_pts = [proj[i] for i in PALM_POLY]
             pygame.draw.polygon(glow, pal["palm_fill"], palm_pts)
             pygame.draw.polygon(glow, pal["palm_line"], palm_pts, 1)
 
-            # Bones
-            for a, b in HAND_BONES:
+            # Bones — far to near
+            for a, b in bone_order:
                 self.draw_bone_stroke(glow, proj[a], proj[b],
                                       pal["bone_out"], 13,
                                       pal["bone_core"], 6)
 
-            # Joints
-            for i, (px, py) in enumerate(proj):
+            # Joints — far to near
+            for i in joint_order:
+                px, py = proj[i]
                 if i in FINGERTIPS:
                     self.draw_sphere_joint(glow, px, py, 8,
                                            pal["tip_fill"], pal["tip_lit"])
@@ -337,10 +351,11 @@ class HandViewer:
             # Low-power: direct draw, no alpha
             palm_pts = [proj[i] for i in PALM_POLY]
             pygame.draw.polygon(self.screen, pal["palm_low"], palm_pts, 1)
-            for a, b in HAND_BONES:
+            for a, b in bone_order:
                 pygame.draw.line(self.screen, pal["bone_low"],
                                  proj[a], proj[b], 5)
-            for i, (px, py) in enumerate(proj):
+            for i in joint_order:
+                px, py = proj[i]
                 color = pal["tip_fill"] if i in FINGERTIPS else pal["joint_fill"]
                 r = 8 if i in FINGERTIPS else 6
                 pygame.draw.circle(self.screen, color, (px, py), r, 0)
