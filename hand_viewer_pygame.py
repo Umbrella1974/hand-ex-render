@@ -288,9 +288,12 @@ class HandViewer:
                     dx = event.pos[0] - self.last_mouse[0]
                     dy = event.pos[1] - self.last_mouse[1]
                     self.yaw -= dx * self.orbit_sensitivity
-                    self.pitch -= dy * self.orbit_sensitivity
+                    self.pitch += dy * self.orbit_sensitivity
                     self.pitch = max(-math.pi / 2, min(math.pi / 2, self.pitch))
                     self.last_mouse = event.pos
+            elif event.type == pygame.MOUSEWHEEL:
+                self.zoom *= 1.1 ** event.y
+                self.zoom = max(0.1, min(10.0, self.zoom))
 
     def render_frame(self):
         pal = self.pal
@@ -311,54 +314,70 @@ class HandViewer:
             return
 
         joints = self.apply_smoothing(self.latest_joints)
-        # Pre-rotate all joints, compute depth (= rotated Z, negative = towards camera)
+        # Pre-rotate all joints, compute depth (= rotated Z)
         rotated = [self.rotate_point(*j) for j in joints]
         proj = [self._project_rotated(rx, ry, rz) for rx, ry, rz in rotated]
         depths = [rz for _, _, rz in rotated]
 
-        # Sort bones far→near by midpoint depth
-        bone_order = sorted(HAND_BONES,
-                            key=lambda ab: (depths[ab[0]] + depths[ab[1]]) * 0.5)
-        # Sort joints far→near by depth
-        joint_order = sorted(range(N_JOINTS), key=lambda i: depths[i])
+        # Unified draw list sorted far→near
+        # Each entry: (depth, type, data)
+        draw_list = []
+
+        # Palm polygon
+        palm_avg_depth = sum(depths[i] for i in PALM_POLY) / len(PALM_POLY)
+        draw_list.append((palm_avg_depth, "palm", None))
+
+        # Bones
+        for a, b in HAND_BONES:
+            d = (depths[a] + depths[b]) * 0.5
+            draw_list.append((d, "bone", (a, b)))
+
+        # Joints
+        for i in range(N_JOINTS):
+            draw_list.append((depths[i], "joint", i))
+
+        draw_list.sort(key=lambda x: x[0])  # far → near
 
         if not self.low_power:
             glow = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
-            # Palm (always behind)
-            palm_pts = [proj[i] for i in PALM_POLY]
-            pygame.draw.polygon(glow, pal["palm_fill"], palm_pts)
-            pygame.draw.polygon(glow, pal["palm_line"], palm_pts, 1)
-
-            # Bones — far to near
-            for a, b in bone_order:
-                self.draw_bone_stroke(glow, proj[a], proj[b],
-                                      pal["bone_out"], 13,
-                                      pal["bone_core"], 6)
-
-            # Joints — far to near
-            for i in joint_order:
-                px, py = proj[i]
-                if i in FINGERTIPS:
-                    self.draw_sphere_joint(glow, px, py, 8,
-                                           pal["tip_fill"], pal["tip_lit"])
-                else:
-                    self.draw_sphere_joint(glow, px, py, 6,
-                                           pal["joint_fill"], pal["joint_lit"])
+            for _, kind, data in draw_list:
+                if kind == "palm":
+                    palm_pts = [proj[i] for i in PALM_POLY]
+                    pygame.draw.polygon(glow, pal["palm_fill"], palm_pts)
+                    pygame.draw.polygon(glow, pal["palm_line"], palm_pts, 1)
+                elif kind == "bone":
+                    a, b = data
+                    self.draw_bone_stroke(glow, proj[a], proj[b],
+                                          pal["bone_out"], 13,
+                                          pal["bone_core"], 6)
+                else:  # joint
+                    i = data
+                    px, py = proj[i]
+                    if i in FINGERTIPS:
+                        self.draw_sphere_joint(glow, px, py, 8,
+                                               pal["tip_fill"], pal["tip_lit"])
+                    else:
+                        self.draw_sphere_joint(glow, px, py, 6,
+                                               pal["joint_fill"], pal["joint_lit"])
 
             self.screen.blit(glow, (0, 0))
         else:
-            # Low-power: direct draw, no alpha
-            palm_pts = [proj[i] for i in PALM_POLY]
-            pygame.draw.polygon(self.screen, pal["palm_low"], palm_pts, 1)
-            for a, b in bone_order:
-                pygame.draw.line(self.screen, pal["bone_low"],
-                                 proj[a], proj[b], 5)
-            for i in joint_order:
-                px, py = proj[i]
-                color = pal["tip_fill"] if i in FINGERTIPS else pal["joint_fill"]
-                r = 8 if i in FINGERTIPS else 6
-                pygame.draw.circle(self.screen, color, (px, py), r, 0)
+            # Low-power: direct draw, still depth-sorted
+            for _, kind, data in draw_list:
+                if kind == "palm":
+                    palm_pts = [proj[i] for i in PALM_POLY]
+                    pygame.draw.polygon(self.screen, pal["palm_low"], palm_pts, 1)
+                elif kind == "bone":
+                    a, b = data
+                    pygame.draw.line(self.screen, pal["bone_low"],
+                                     proj[a], proj[b], 5)
+                else:  # joint
+                    i = data
+                    px, py = proj[i]
+                    color = pal["tip_fill"] if i in FINGERTIPS else pal["joint_fill"]
+                    r = 8 if i in FINGERTIPS else 6
+                    pygame.draw.circle(self.screen, color, (px, py), r, 0)
 
         # HUD
         lines = [
